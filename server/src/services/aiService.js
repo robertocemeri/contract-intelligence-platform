@@ -117,7 +117,7 @@ CRITICAL RULES:
     }
 
     try {
-      const prompt = `You are a legal risk analyst. Analyze this contract for potential risks and return valid JSON with DOUBLE QUOTES only.
+      const prompt = `You are a legal risk analyst. Analyze this contract for potential risks.
 
 Contract Summary:
 - Parties: ${JSON.stringify(extractedData.parties || [])}
@@ -127,7 +127,7 @@ Contract Summary:
 Full Contract Text:
 ${contractText.substring(0, 15000)} 
 
-Identify risks and return ONLY a JSON object with DOUBLE QUOTES:
+Return ONLY valid JSON (no markdown, no extra text):
 
 {
   "riskLevel": "low|medium|high|critical",
@@ -135,22 +135,20 @@ Identify risks and return ONLY a JSON object with DOUBLE QUOTES:
     {
       "category": "financial|legal|operational|compliance|reputational",
       "severity": "low|medium|high|critical",
-      "description": "clear explanation of the risk",
-      "recommendation": "specific action to mitigate"
+      "description": "clear explanation",
+      "recommendation": "specific action"
     }
   ],
   "overallAssessment": "brief summary",
-  "confidence": 0.0-1.0
+  "confidence": 0.8
 }
 
-CRITICAL: Use DOUBLE QUOTES for all strings. Return ONLY JSON, no other text.
-
-Focus on:
-- Unfavorable terms
-- Missing protections
-- Unclear obligations
-- Compliance issues
-- Financial exposure`;
+CRITICAL JSON RULES:
+- Use DOUBLE QUOTES for all strings
+- Escape any quotes inside descriptions (use \\" not ")
+- No trailing commas
+- All descriptions should be complete sentences
+- Return raw JSON only, no markdown code blocks`;
 
       const response = await this.client.messages.create({
         model: this.model,
@@ -346,51 +344,77 @@ Consider:
       // Remove markdown code blocks if present
       let cleanText = text.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
       
-      // Replace single quotes with double quotes for valid JSON
-      // This handles cases where AI returns JavaScript-style objects
-      cleanText = cleanText.replace(/'/g, '"');
-      
-      // Extract JSON from potential text wrapping
+      // Try to extract and fix common JSON issues
       const jsonMatch = cleanText.match(/\{[\s\S]*\}/);
       if (!jsonMatch) {
         throw new Error('No JSON found in response');
       }
       
-      // Parse the JSON
-      const parsed = JSON.parse(jsonMatch[0]);
+      let jsonStr = jsonMatch[0];
       
-      // Deep validation - ensure all nested data is properly parsed
-      const validateAndParse = (obj) => {
-        if (typeof obj === 'string') {
-          // Try to parse if it looks like JSON
-          if ((obj.startsWith('{') && obj.endsWith('}')) || 
-              (obj.startsWith('[') && obj.endsWith(']'))) {
-            try {
-              return JSON.parse(obj.replace(/'/g, '"'));
-            } catch (e) {
-              return obj;
-            }
-          }
+      // Try parsing as-is first
+      try {
+        const parsed = JSON.parse(jsonStr);
+        return this._validateAndFixParsedData(parsed);
+      } catch (firstError) {
+        // If that fails, try some fixes
+        console.log('Initial parse failed, attempting fixes...');
+        
+        // Fix 1: Replace single quotes with double quotes (but be careful with apostrophes)
+        jsonStr = jsonStr.replace(/:\s*'([^']*)'/g, ': "$1"');
+        jsonStr = jsonStr.replace(/\{\s*'([^']*)'\s*:/g, '{"$1":');
+        
+        // Fix 2: Try to fix unescaped quotes in string values
+        // This is a heuristic - look for quote followed by non-whitespace that isn't : or ,
+        jsonStr = jsonStr.replace(/("description":\s*")([^"]*?)"/g, (match, prefix, content) => {
+          // Escape internal quotes
+          const escapedContent = content.replace(/"/g, '\\"');
+          return prefix + escapedContent + '"';
+        });
+        
+        try {
+          const parsed = JSON.parse(jsonStr);
+          return this._validateAndFixParsedData(parsed);
+        } catch (secondError) {
+          console.error('Second parse attempt failed:', secondError.message);
+          throw new Error('Could not parse AI response as valid JSON: ' + secondError.message);
         }
-        return obj;
-      };
-      
-      // Validate and fix each field
-      if (parsed.parties) parsed.parties = validateAndParse(parsed.parties);
-      if (parsed.keyDates) parsed.keyDates = validateAndParse(parsed.keyDates);
-      if (parsed.financialTerms) parsed.financialTerms = validateAndParse(parsed.financialTerms);
-      if (parsed.clauses) parsed.clauses = validateAndParse(parsed.clauses);
-      if (parsed.risks) parsed.risks = validateAndParse(parsed.risks);
-      if (parsed.issues) parsed.issues = validateAndParse(parsed.issues);
-      if (parsed.recommendations) parsed.recommendations = validateAndParse(parsed.recommendations);
-      if (parsed.comparableTerms) parsed.comparableTerms = validateAndParse(parsed.comparableTerms);
-      
-      return parsed;
+      }
     } catch (error) {
       console.error('Failed to parse AI response:', error.message);
-      console.error('Raw text (first 500 chars):', text.substring(0, 500));
+      console.error('Raw text (first 1000 chars):', text.substring(0, 1000));
       throw new Error('Invalid AI response format: ' + error.message);
     }
+  }
+  
+  _validateAndFixParsedData(parsed) {
+    // Deep validation - ensure all nested data is properly parsed
+    const validateAndParse = (obj) => {
+      if (typeof obj === 'string') {
+        // Try to parse if it looks like JSON
+        if ((obj.startsWith('{') && obj.endsWith('}')) || 
+            (obj.startsWith('[') && obj.endsWith(']'))) {
+          try {
+            return JSON.parse(obj.replace(/'/g, '"'));
+          } catch (e) {
+            return obj;
+          }
+        }
+      }
+      return obj;
+    };
+    
+    // Validate and fix each field
+    if (parsed.parties) parsed.parties = validateAndParse(parsed.parties);
+    if (parsed.keyDates) parsed.keyDates = validateAndParse(parsed.keyDates);
+    if (parsed.financialTerms) parsed.financialTerms = validateAndParse(parsed.financialTerms);
+    if (parsed.clauses) parsed.clauses = validateAndParse(parsed.clauses);
+    if (parsed.risks) parsed.risks = validateAndParse(parsed.risks);
+    if (parsed.issues) parsed.issues = validateAndParse(parsed.issues);
+    if (parsed.recommendations) parsed.recommendations = validateAndParse(parsed.recommendations);
+    if (parsed.comparableTerms) parsed.comparableTerms = validateAndParse(parsed.comparableTerms);
+    
+    return parsed;
   }
 
   _extractKeywords(text) {
